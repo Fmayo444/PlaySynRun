@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>5K Runner - Spotify Playlist Generator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background: linear-gradient(135deg, #1DB954 0%, #191414 100%); min-height: 100vh; }
+        .glass { background: rgba(255, 255, 255, 0.1); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.2); }
+        .spotify-green { background-color: #1DB954; }
+        .spotify-green:hover { background-color: #1ed760; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="module">
+        import React, { useState, useEffect } from 'https://cdn.skypack.dev/react';
+        import ReactDOM from 'https://cdn.skypack.dev/react-dom';
+
+        const CLIENT_ID = 'YOUR_CLIENT_ID_HERE';
+        const REDIRECT_URI = window.location.href.split('?')[0];
+        const SCOPES = 'user-top-read playlist-modify-public playlist-modify-private';
+
+        const generateRandomString = (length) => {
+            const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+            const values = crypto.getRandomValues(new Uint8Array(length));
+            return values.reduce((acc, x) => acc + possible[x % possible.length], "");
+        };
+
+        const sha256 = async (plain) => {
+            const encoder = new TextEncoder();
+            const data = encoder.encode(plain);
+            return window.crypto.subtle.digest('SHA-256', data);
+        };
+
+        const base64encode = (input) => btoa(String.fromCharCode(...new Uint8Array(input))).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+
+        const getAuthUrl = async () => {
+            const codeVerifier = generateRandomString(64);
+            const hashed = await sha256(codeVerifier);
+            const codeChallenge = base64encode(hashed);
+            localStorage.setItem('code_verifier', codeVerifier);
+            const params = new URLSearchParams({
+                response_type: 'code', client_id: CLIENT_ID, scope: SCOPES,
+                code_challenge_method: 'S256', code_challenge: codeChallenge, redirect_uri: REDIRECT_URI,
+            });
+            return `https://accounts.spotify.com/authorize?${params}`;
+        };
+
+        const getAccessToken = async (code) => {
+            const response = await fetch('https://accounts.spotify.com/api/token', {
+                method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({
+                    client_id: CLIENT_ID, grant_type: 'authorization_code', code: code,
+                    redirect_uri: REDIRECT_URI, code_verifier: localStorage.getItem('code_verifier'),
+                }),
+            });
+            return await response.json();
+        };
+
+        function App() {
+            const [accessToken, setAccessToken] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [playlists, setPlaylists] = useState([]);
+            const [error, setError] = useState(null);
+
+            useEffect(() => {
+                const params = new URLSearchParams(window.location.search);
+                const code = params.get('code');
+                if (code) {
+                    getAccessToken(code).then(data => {
+                        if (data.access_token) {
+                            setAccessToken(data.access_token);
+                            localStorage.setItem('spotify_token', data.access_token);
+                            window.history.replaceState({}, '', window.location.pathname);
+                        }
+                    });
+                } else {
+                    const stored = localStorage.getItem('spotify_token');
+                    if (stored) setAccessToken(stored);
+                }
+            }, []);
+
+            const handleLogin = async () => window.location.href = await getAuthUrl();
+            const handleLogout = () => { setAccessToken(null); localStorage.clear(); };
+
+            const generatePlaylist = async (mood) => {
+                setLoading(true); setError(null);
+                try {
+                    const topRes = await fetch('https://api.spotify.com/v1/me/top/tracks?limit=5', {
+                        headers: { 'Authorization': `Bearer ${accessToken}` }
+                    });
+                    if (!topRes.ok) throw new Error('Failed to fetch top tracks');
+                    const topTracks = await topRes.json();
+                    const seeds = topTracks.items.slice(0, 5).map(t => t.id);
+
+                    const configs = {
+                        chill: { name: '5K Easy Run', phases: [
+                            { duration: 360, tempo: 155, energy: 0.5, name: 'Easy Start' },
+                            { duration: 1080, tempo: 160, energy: 0.65, name: 'Steady' },
+                            { duration: 360, tempo: 150, energy: 0.55, name: 'Cool-down' }
+                        ]},
+                        balanced: { name: '5K Balanced Run', phases: [
+                            { duration: 300, tempo: 160, energy: 0.6, name: 'Warm-up' },
+                            { duration: 1200, tempo: 170, energy: 0.8, name: 'Steady Pace' },
+                            { duration: 300, tempo: 165, energy: 0.7, name: 'Cool-down' }
+                        ]},
+                        intense: { name: '5K High Intensity', phases: [
+                            { duration: 240, tempo: 165, energy: 0.7, name: 'Warm-up' },
+                            { duration: 1260, tempo: 180, energy: 0.9, name: 'Push Hard' },
+                            { duration: 300, tempo: 170, energy: 0.75, name: 'Cool-down' }
+                        ]}
+                    };
+
+                    const config = configs[mood];
+                    const allTracks = [];
+
+                    for (const phase of config.phases) {
+                        let phaseDuration = 0; const phaseTracks = [];
+                        while (phaseDuration < phase.duration) {
+                            const params = new URLSearchParams({
+                                seed_tracks: seeds.join(','), target_tempo: phase.tempo, target_energy: phase.energy,
+                                target_danceability: 0.7, min_tempo: phase.tempo - 10, max_tempo: phase.tempo + 10, limit: 10
+                            });
+                            const res = await fetch(`https://api.spotify.com/v1/recommendations?${params}`, {
+                                headers: { 'Authorization': `Bearer ${accessToken}` }
+                            });
+                            if (!res.ok) throw new Error('Failed to get recommendations');
+                            const data = await res.json();
+                            const newTracks = data.tracks.filter(t => 
+                                !phaseTracks.some(pt => pt.id === t.id) && !allTracks.some(at => at.id === t.id)
+                            );
+                            if (newTracks.length === 0) break;
+                            for (const track of newTracks) {
+                                if (phaseDuration >= phase.duration) break;
+                                phaseTracks.push({ ...track, phase: phase.name });
+                                phaseDuration += track.duration_ms / 1000;
+                            }
+                            if (phaseDuration >= phase.duration) break;
+                        }
+                        allTracks.push(...phaseTracks);
+                    }
+
+                    const userRes = await fetch('https://api.spotify.com/v1/me', {
+                        headers: { 'Authorization': `Bearer ${accessToken}` }
+                    });
+                    const user = await userRes.json();
+                    const createRes = await fetch(`https://api.spotify.com/v1/users/${user.id}/playlists`, {
+                        method: 'POST', headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            name: `${config.name} - ${new Date().toLocaleDateString()}`,
+                            description: '25-min running playlist with adaptive pacing. Generated by 5K Runner.', public: false
+                        })
+                    });
+                    const playlist = await createRes.json();
+                    await fetch(`https://api.spotify.com/v1/playlists/${playlist.id}/tracks`, {
+                        method: 'POST', headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ uris: allTracks.map(t => t.uri) })
+                    });
+
+                    const duration = (allTracks.reduce((s, t) => s + t.duration_ms, 0) / 60000).toFixed(1);
+                    setPlaylists(prev => [...prev, { id: playlist.id, name: config.name, tracks: allTracks, duration, url: playlist.external_urls.spotify }]);
+                } catch (err) { setError(err.message); } finally { setLoading(false); }
+            };
+
+            if (!accessToken) {
+                return React.createElement('div', { className: "min-h-screen flex items-center justify-center p-4" },
+                    React.createElement('div', { className: "glass rounded-3xl p-8 max-w-md w-full text-center" },
+                        React.createElement('div', { className: "text-6xl mb-4" }, '🏃‍♂️🎵'),
+                        React.createElement('h1', { className: "text-4xl font-bold text-white mb-4" }, '5K Runner'),
+                        React.createElement('p', { className: "text-gray-200 mb-6" }, 
+                            'Generate the perfect 25-minute Spotify playlist for your 5K run, tailored to your music taste with adaptive pacing.'
+                        ),
+                        React.createElement('button', { onClick: handleLogin, className: "spotify-green text-white font-bold py-3 px-8 rounded-full w-full hover:scale-105 transition-transform" }, 
+                            'Connect with Spotify'
+                        )
+                    )
+                );
+            }
+
+            return React.createElement('div', { className: "min-h-screen p-4 md:p-8" },
+                React.createElement('div', { className: "max-w-6xl mx-auto" },
+                    React.createElement('div', { className: "glass rounded-2xl p-6 mb-6" },
+                        React.createElement('div', { className: "flex justify-between items-center" },
+                            React.createElement('div', null,
+                                React.createElement('h1', { className: "text-3xl font-bold text-white mb-2" }, '5K Runner 🏃‍♂️'),
+                                React.createElement('p', { className: "text-gray-200" }, 'Create your perfect running playlist')
+                            ),
+                            React.createElement('button', { onClick: handleLogout, className: "bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg" }, 'Logout')
+                        )
+                    ),
+                    React.createElement('div', { className: "glass rounded-2xl p-6 mb-6" },
+                        React.createElement('h2', { className: "text-2xl font-bold text-white mb-4" }, 'Generate New Playlist'),
+                        React.createElement('div', { className: "grid grid-cols-1 md:grid-cols-3 gap-4 mb-6" },
+                            React.createElement('button', { onClick: () => generatePlaylist('chill'), disabled: loading, 
+                                className: `p-6 rounded-xl bg-white/10 text-white hover:bg-blue-500 transition-all ${loading ? 'opacity-50 cursor-not-allowed' : ''}` },
+                                React.createElement('div', { className: "text-4xl mb-2" }, '🌊'),
+                                React.createElement('div', { className: "font-bold text-lg" }, 'Easy Run'),
+                                React.createElement('div', { className: "text-sm opacity-80" }, 'Relaxed pace, 150-160 BPM')
+                            ),
+                            React.createElement('button', { onClick: () => generatePlaylist('balanced'), disabled: loading,
+                                className: `p-6 rounded-xl bg-white/10 text-white hover:bg-green-500 transition-all ${loading ? 'opacity-50 cursor-not-allowed' : ''}` },
+                                React.createElement('div', { className: "text-4xl mb-2" }, '⚡'),
+                                React.createElement('div', { className: "font-bold text-lg" }, 'Balanced'),
+                                React.createElement('div', { className: "text-sm opacity-80" }, 'Steady pace, 160-170 BPM')
+                            ),
+                            React.createElement('button', { onClick: () => generatePlaylist('intense'), disabled: loading,
+                                className: `p-6 rounded-xl bg-white/10 text-white hover:bg-red-500 transition-all ${loading ? 'opacity-50 cursor-not-allowed' : ''}` },
+                                React.createElement('div', { className: "text-4xl mb-2" }, '🔥'),
+                                React.createElement('div', { className: "font-bold text-lg" }, 'High Intensity'),
+                                React.createElement('div', { className: "text-sm opacity-80" }, 'Fast pace, 170-180 BPM')
+                            )
+                        ),
+                        loading && React.createElement('div', { className: "text-center text-white" },
+                            React.createElement('div', { className: "animate-pulse text-xl" }, '🎵 Generating your playlist...')
+                        ),
+                        error && React.createElement('div', { className: "bg-red-500/20 border border-red-500 text-white p-4 rounded-lg" }, `Error: ${error}`)
+                    ),
+                    playlists.length > 0 && React.createElement('div', { className: "glass rounded-2xl p-6" },
+                        React.createElement('h2', { className: "text-2xl font-bold text-white mb-4" }, 'Your Playlists'),
+                        React.createElement('div', { className: "space-y-4" },
+                            playlists.map((pl, i) => React.createElement('div', { key: i, className: "bg-white/10 rounded-xl p-6" },
+                                React.createElement('div', { className: "flex justify-between items-start mb-4" },
+                                    React.createElement('div', null,
+                                        React.createElement('h3', { className: "text-xl font-bold text-white" }, pl.name),
+                                        React.createElement('p', { className: "text-gray-300" }, `${pl.tracks.length} tracks • ${pl.duration} min`)
+                                    ),
+                                    React.createElement('a', { href: pl.url, target: "_blank", rel: "noopener noreferrer",
+                                        className: "spotify-green text-white px-6 py-2 rounded-full hover:scale-105 transition-transform" }, 'Open in Spotify')
+                                ),
+                                React.createElement('div', { className: "space-y-2 max-h-60 overflow-y-auto" },
+                                    pl.tracks.map((t, j) => React.createElement('div', { key: j, className: "flex items-center gap-3 text-white/80 text-sm" },
+                                        React.createElement('span', { className: "text-white/60 w-6" }, j + 1),
+                                        React.createElement('img', { src: t.album.images[2]?.url, alt: "", className: "w-10 h-10 rounded" }),
+                                        React.createElement('div', { className: "flex-1 min-w-0" },
+                                            React.createElement('div', { className: "truncate" }, t.name),
+                                            React.createElement('div', { className: "text-xs text-white/60 truncate" }, t.artists.map(a => a.name).join(', '))
+                                        ),
+                                        React.createElement('span', { className: "text-xs bg-white/10 px-2 py-1 rounded" }, t.phase),
+                                        React.createElement('span', { className: "text-white/60" }, 
+                                            `${Math.floor(t.duration_ms / 60000)}:${String(Math.floor((t.duration_ms % 60000) / 1000)).padStart(2, '0')}`
+                                        )
+                                    ))
+                                )
+                            ))
+                        )
+                    )
+                )
+            );
+        }
+
+        ReactDOM.render(React.createElement(App), document.getElementById('root'));
+    </script>
+</body>
+</html>
