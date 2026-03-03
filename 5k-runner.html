@@ -170,11 +170,14 @@
                             });
                             
                             if (!res.ok) {
-                                const errorData = await res.json();
-                                throw new Error(errorData.error?.message || 'Recommendation API failed');
+                                const errorText = await res.text();
+                                console.error('API Error Response:', errorText);
+                                throw new Error(`API returned ${res.status}: ${errorText.substring(0, 100)}`);
                             }
                             
-                            const data = await res.json();
+                            const responseText = await res.text();
+                            console.log('API Response:', responseText.substring(0, 200));
+                            const data = JSON.parse(responseText);
                             if (!data.tracks || data.tracks.length === 0) break;
                             
                             const newTracks = data.tracks.filter(t => 
@@ -357,5 +360,4 @@
         ReactDOM.render(React.createElement(App), document.getElementById('root'));
     </script>
 </body>
-
 </html>
