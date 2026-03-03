@@ -97,48 +97,42 @@
             const generatePlaylist = async (mood) => {
                 setLoading(true); setError(null);
                 try {
-                    let seeds = [];
-                    
-                    // Try to get user top tracks
-                    try {
-                        const topRes = await fetch('https://api.spotify.com/v1/me/top/tracks?limit=5&time_range=medium_term', {
-                            headers: { 'Authorization': `Bearer ${accessToken}` }
-                        });
-                        if (topRes.ok) {
-                            const topTracks = await topRes.json();
-                            if (topTracks.items && topTracks.items.length >= 5) {
-                                seeds = topTracks.items.slice(0, 5).map(t => t.id);
-                                console.log('Using your personalized top tracks!');
-                            }
-                        }
-                    } catch (err) {
-                        console.log('Could not fetch top tracks');
-                    }
-
-
-                    // Fallback to popular energetic running tracks
-                    if (seeds.length < 5) {
-                        console.log('Using popular running tracks as seeds');
-                        seeds = ['3n3Ppam7vgaVa1iaRUc9Lp', '0VjIjW4GlUZAMYd2vXMi3b', '60nZcImufyMA1MKQY3dcCH', '5Z01UMMf7V1o0MzF86s6WJ', '6habFhsOp2NvshLv26DqMb'];
-                    }
+                    // Use genre seeds instead of track seeds - more reliable
+                    const genreSeeds = {
+                        chill: ['pop', 'indie', 'alternative'],
+                        balanced: ['pop', 'rock', 'dance'],
+                        intense: ['rock', 'edm', 'hip-hop']
+                    };
 
 
                     const configs = {
-                        chill: { name: '5K Easy Run', phases: [
-                            { duration: 360, tempo: 155, energy: 0.5 },
-                            { duration: 1080, tempo: 160, energy: 0.65 },
-                            { duration: 360, tempo: 150, energy: 0.55 }
-                        ]},
-                        balanced: { name: '5K Balanced Run', phases: [
-                            { duration: 300, tempo: 160, energy: 0.6 },
-                            { duration: 1200, tempo: 170, energy: 0.8 },
-                            { duration: 300, tempo: 165, energy: 0.7 }
-                        ]},
-                        intense: { name: '5K High Intensity', phases: [
-                            { duration: 240, tempo: 165, energy: 0.7 },
-                            { duration: 1260, tempo: 180, energy: 0.9 },
-                            { duration: 300, tempo: 170, energy: 0.75 }
-                        ]}
+                        chill: { 
+                            name: '5K Easy Run', 
+                            genres: genreSeeds.chill,
+                            phases: [
+                                { duration: 360, tempo: 145, energy: 0.5 },
+                                { duration: 1080, tempo: 155, energy: 0.6 },
+                                { duration: 360, tempo: 145, energy: 0.5 }
+                            ]
+                        },
+                        balanced: { 
+                            name: '5K Balanced Run',
+                            genres: genreSeeds.balanced,
+                            phases: [
+                                { duration: 300, tempo: 155, energy: 0.65 },
+                                { duration: 1200, tempo: 165, energy: 0.75 },
+                                { duration: 300, tempo: 155, energy: 0.65 }
+                            ]
+                        },
+                        intense: { 
+                            name: '5K High Intensity',
+                            genres: genreSeeds.intense,
+                            phases: [
+                                { duration: 240, tempo: 160, energy: 0.7 },
+                                { duration: 1260, tempo: 175, energy: 0.85 },
+                                { duration: 300, tempo: 165, energy: 0.75 }
+                            ]
+                        }
                     };
 
 
@@ -151,19 +145,20 @@
                         const phase = config.phases[i];
                         let phaseDuration = 0;
                         const phaseTracks = [];
-                        let attempts = 0;
                         
-                        while (phaseDuration < phase.duration && attempts < 3) {
-                            attempts++;
+                        while (phaseDuration < phase.duration) {
                             const params = new URLSearchParams({
-                                seed_tracks: seeds.join(','), 
-                                target_tempo: phase.tempo, 
+                                seed_genres: config.genres.join(','),
+                                target_tempo: phase.tempo,
+                                min_tempo: phase.tempo - 20,
+                                max_tempo: phase.tempo + 20,
                                 target_energy: phase.energy,
-                                target_danceability: 0.7, 
-                                min_tempo: phase.tempo - 15, 
-                                max_tempo: phase.tempo + 15, 
+                                min_energy: Math.max(0.3, phase.energy - 0.2),
+                                target_valence: 0.6,
                                 limit: 20
                             });
+                            
+                            console.log('Requesting:', params.toString());
                             
                             const res = await fetch(`https://api.spotify.com/v1/recommendations?${params}`, {
                                 headers: { 'Authorization': `Bearer ${accessToken}` }
@@ -171,13 +166,13 @@
                             
                             if (!res.ok) {
                                 const errorText = await res.text();
-                                console.error('API Error Response:', errorText);
-                                throw new Error(`API returned ${res.status}: ${errorText.substring(0, 100)}`);
+                                console.error('API Error:', res.status, errorText);
+                                throw new Error(`Spotify API error (${res.status}). Try logging out and back in.`);
                             }
                             
-                            const responseText = await res.text();
-                            console.log('API Response:', responseText.substring(0, 200));
-                            const data = JSON.parse(responseText);
+                            const data = await res.json();
+                            console.log('Got', data.tracks?.length, 'tracks');
+                            
                             if (!data.tracks || data.tracks.length === 0) break;
                             
                             const newTracks = data.tracks.filter(t => 
@@ -185,11 +180,14 @@
                                 !allTracks.some(at => at.id === t.id)
                             );
                             
+                            if (newTracks.length === 0) break;
+                            
                             for (const track of newTracks) {
                                 if (phaseDuration >= phase.duration) break;
                                 phaseTracks.push({ ...track, phase: phaseNames[i] });
                                 phaseDuration += track.duration_ms / 1000;
                             }
+                            
                             if (phaseDuration >= phase.duration) break;
                         }
                         
@@ -197,7 +195,9 @@
                     }
 
 
-                    if (allTracks.length === 0) throw new Error('Could not generate tracks');
+                    if (allTracks.length === 0) {
+                        throw new Error('Could not find matching songs. Try a different mood!');
+                    }
 
 
                     const userRes = await fetch('https://api.spotify.com/v1/me', {
@@ -210,7 +210,7 @@
                         headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             name: `${config.name} - ${new Date().toLocaleDateString()}`,
-                            description: '25-min running playlist with adaptive pacing. Generated by 5K Runner.', 
+                            description: '25-min running playlist. Generated by 5K Runner.', 
                             public: false
                         })
                     });
@@ -280,7 +280,7 @@
                             },
                                 React.createElement('div', { className: "text-4xl mb-2" }, '🌊'),
                                 React.createElement('div', { className: "font-bold text-lg" }, 'Easy Run'),
-                                React.createElement('div', { className: "text-sm opacity-80" }, 'Relaxed, 150-160 BPM')
+                                React.createElement('div', { className: "text-sm opacity-80" }, 'Relaxed, 145-155 BPM')
                             ),
                             React.createElement('button', { 
                                 onClick: () => generatePlaylist('balanced'), 
@@ -289,7 +289,7 @@
                             },
                                 React.createElement('div', { className: "text-4xl mb-2" }, '⚡'),
                                 React.createElement('div', { className: "font-bold text-lg" }, 'Balanced'),
-                                React.createElement('div', { className: "text-sm opacity-80" }, 'Steady, 160-170 BPM')
+                                React.createElement('div', { className: "text-sm opacity-80" }, 'Steady, 155-165 BPM')
                             ),
                             React.createElement('button', { 
                                 onClick: () => generatePlaylist('intense'), 
@@ -298,7 +298,7 @@
                             },
                                 React.createElement('div', { className: "text-4xl mb-2" }, '🔥'),
                                 React.createElement('div', { className: "font-bold text-lg" }, 'High Intensity'),
-                                React.createElement('div', { className: "text-sm opacity-80" }, 'Fast, 170-180 BPM')
+                                React.createElement('div', { className: "text-sm opacity-80" }, 'Fast, 160-175 BPM')
                             )
                         ),
                         loading && React.createElement('div', { className: "text-center text-white" },
